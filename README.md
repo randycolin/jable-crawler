@@ -1,6 +1,6 @@
 # JDL — Jable.tv / 91PORNY 视频管理与下载工具
 
-成人视频站点的元数据爬取、批量下载、本地播放一体化方案。
+视频站点的元数据爬取、批量下载、本地播放一体化方案。
 
 > ⚠️ **仅供学习交流使用**。请遵守所在国家/地区法律法规与目标站点服务条款。仅下载你有合法访问权的内容。
 
@@ -16,7 +16,7 @@
 ## 🚀 一键安装
 
 ```bash
-git clone https://github.com/<你的账号>/jable-crawler.git
+git clone https://github.com/randycolin/jable-crawler.git
 cd jable-crawler
 sudo bash install.sh
 ```
