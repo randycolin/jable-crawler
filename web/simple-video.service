@@ -1,0 +1,21 @@
+[Unit]
+Description=Simple Video Player Website
+After=network.target
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/root/video-simple
+Environment="PATH=/root/video-simple/venv/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+Environment="VIDEO_DIR=/root/jable-crawler/videos"
+Environment="BIND_HOST=0.0.0.0"
+Environment="PORT=8090"
+ExecStart=/root/video-simple/venv/bin/python3 /root/video-simple/app.py
+Restart=always
+RestartSec=10
+StandardOutput=syslog
+StandardError=syslog
+SyslogIdentifier=simple-video
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,1352 @@
+#!/usr/bin/env python3
+"""
+Jable 视频管理器 v1.0
+交互式菜单 + 命令行双模式
+"""
+import sys
+import os
+import signal
+import threading
+import time
+import re
+import shutil
+from pathlib import Path
+
+# 添加项目路径
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+
+from rich.console import Console
+from rich.table import Table
+from rich.panel import Panel
+from rich.progress import Progress, SpinnerColumn, BarColumn, TextColumn, TimeRemainingColumn
+from rich.prompt import Prompt, IntPrompt, Confirm
+from rich.text import Text
+from rich.columns import Columns
+from rich import box
+
+from database import (DB_PATH, init_db, search_videos, count_videos, get_favorites,
+                      toggle_favorite, get_random_videos, get_stats, add_video,
+                      get_setting, set_setting, add_to_queue, get_queue,
+                      update_queue_status, get_crawl_progress, get_download_progress,
+                      update_download_progress, get_conn, recover_incomplete_downloads,
+                      mark_downloaded)
+from crawler import crawl_tag, crawl_category, fetch_categories, fetch_tags, fetch_video_detail
+from downloader import (download_video, fast_download_video, download_manager, start_background_daemon, is_daemon_running, stop_background_daemon, DAEMON_PID_FILE)
+from sites import detect_adapter, get_adapter
+
+console = Console()
+
+# 中文标签 → 英文slug 自动映射
+TAG_MAP = {
+    '3p': '3p', '4小时以上': 'more-than-4-hours', '四小时以上': 'more-than-4-hours',
+    'cosplay': 'Cosplay', 'ntr': 'ntr', 'ol': 'ol', '一日十次': '10-times-a-day',
+    '雨天': 'rainy-day', '中出': 'creampie', '女主播': 'female-anchor',
+    '乳交': 'tit-wank', '人妻': 'wife', '店铺': 'store', '健身房': 'gym-room',
+    '偶像': 'idol', '私拍': 'private-cam', '催眠': 'hypnosis', '兔女郎': 'bunny-girl',
+    '凌辱': 'insult', '不伦': 'affair', '握紧': 'grip', '口交': 'blowjob',
+    '口内射精': 'cum-in-mouth', '长筒袜': 'stockings', '和服': 'kimono',
+    '图书馆': 'library', '群交': 'groupsex', '睡奸': 'sex-beside-husband',
+    '女仆': 'maid', '女性向': 'for-women', '婚纱': 'wedding-dress', '春药': 'love-potion',
+    '娇小': 'dainty', '学校': 'school', '家庭教师': 'private-teacher', '主妇': 'housewife',
+    '少女': 'girl', '巨乳': 'big-tits', '巨根': 'giant', '年龄差': 'age-difference',
+    '偷窃': 'shoplifting', '厕所': 'toilet', '复仇': 'avenge', '情侣': 'couple',
+    '感谢': 'thanksgiving', '按摩': 'massage', '接吻': 'kiss', '侦探': 'detective',
+    '放尿': 'piss', '旗袍': 'cheongsam', '时间停止': 'time-stop', '未亡人': 'widow',
+    '校服': 'school-uniform', '母乳': 'breast-milk', '泳装': 'swimsuit', '车': 'car',
+    '泡泡浴': 'soapland', '酩酊': 'crapulence', '泳池': 'swimming-pool', '浴室': 'bathing-place',
+    '深喉': 'deep-throat', '温泉': 'hot-spring', '渔网袜': 'fishnets', '潮吹': 'squirting',
+    '熟女': 'mature-woman', '兽耳': 'kemonomimi', '经纪人': 'team-manager', '受虐男': 'masochism-guy',
+    '痉挛': 'spasms', '痴女': 'chizyo', '痴汉': 'chikan', '白虎': 'hairless-pussy',
+    '监狱': 'prison', '眼镜': 'glasses', '速战速决': 'quickie', '短发': 'short-hair',
+    '空姐': 'flight-attendant', '处女': 'virginity', '祭典': 'festival', '刺青': 'tattoo',
+    '连裤袜': 'pantyhose', '黑丝': 'pantyhose', '捆绑': 'bondage', '综艺': 'variety-show',
+    '美臀': 'beautiful-butt', '美腿': 'beautiful-leg', '教师': 'teacher',
+    '肉色丝袜': 'flesh-toned-pantyhose', '肛交': 'anal-sex', '足交': 'footjob',
+    '初夜': 'first-night', '引退': 'debut-retires', '近亲': 'kinship', '诱惑': 'temptation',
+    '调教': 'tune', '护士': 'nurse', '贫乳': 'small-tits', '柔体': 'flexible-body',
+    '逃亡': 'fugitive', '闯入': 'intrusion', '运动服': 'sportswear', '过膝袜': 'knee-socks',
+    '丑男': 'ugly-man', '医生': 'doctor', '偷拍': 'video-recording', '终电': 'missed-last-train',
+    '高个子': 'tall', '轮奸': 'gang-intrusion', '电车': 'tram', '露天': 'outdoor',
+    '青梅竹马': 'childhood', '颜射': 'facial', '风俗': 'club-hostess-and-sex-worker',
+    '魔镜': 'magic-mirror', '黑': 'black', '日晒': 'suntan', '小麦色': 'suntan',
+}
+
+def auto_tag(tag):
+    """自动将中文标签转为英文slug，原文保留"""
+    if not tag:
+        return tag
+    # 先查完整匹配
+    if tag in TAG_MAP:
+        return TAG_MAP[tag]
+    # 查部分匹配：输入包含中文标签名
+    for cn, en in TAG_MAP.items():
+        if cn in tag or tag in cn:
+            return en
+    return tag
+
+# Ctrl+C 处理
+stop_event = threading.Event()
+
+
+def signal_handler(sig, frame):
+    if stop_event.is_set():
+        console.print("\n[red]强制退出[/red]")
+        sys.exit(1)
+    stop_event.set()
+    console.print("\n[yellow]正在停止...再按一次强制退出[/yellow]")
+
+
+signal.signal(signal.SIGINT, signal_handler)
+
+
+def clear_screen():
+    os.system('clear' if os.name != 'nt' else 'cls')
+
+
+def show_banner():
+    banner = """
+╔══════════════════════════════════════╗
+║      [bold cyan]Jable 视频管理器 v1.0[/bold cyan]         ║
+║      [dim]全功能交互式爬虫系统[/dim]          ║
+╚══════════════════════════════════════╝"""
+    console.print(Panel(banner, border_style="cyan"))
+
+
+def show_main_menu():
+    menu = Table(show_header=False, box=box.SIMPLE, padding=(0, 2))
+    menu.add_column(style="bold cyan", width=4)
+    menu.add_column(style="white")
+    menu.add_column(style="dim", width=20)
+
+    menu.add_row("1.", "Jable", "爬取/搜索/下载")
+    menu.add_row("2.", "91PORNY", "关键词搜索/下载")
+    menu.add_row("3.", "全库搜索", "跨站点搜索")
+    menu.add_row("4.", "下载队列", "队列批量下载")
+    menu.add_row("5.", "查看统计", "数据总览")
+    menu.add_row("6.", "收藏夹", "管理收藏")
+    menu.add_row("7.", "历史记录", "已下载列表")
+    menu.add_row("8.", "随机推荐", "发现新视频")
+    menu.add_row("9.", "设置", "配置参数")
+    menu.add_row("10.", "工具箱", "自检/清理/后台")
+    menu.add_row("0.", "退出", "")
+
+    console.print(menu)
+
+
+def menu_jable():
+    """Jable 专区。"""
+    while True:
+        console.print("\n[bold cyan]── Jable ──[/bold cyan]")
+        console.print("  1. 按标签爬取")
+        console.print("  2. 按分类爬取")
+        console.print("  3. 搜索/下载")
+        console.print("  4. 批量下载")
+        console.print("  5. 继续未完成爬取")
+        console.print("  6. 查看爬取进度")
+        console.print("  0. 返回")
+
+        choice = Prompt.ask("\n选择", default="0")
+        if choice == '0':
+            break
+        elif choice == '1':
+            crawl_by_tag()
+        elif choice == '2':
+            crawl_by_category()
+        elif choice == '3':
+            menu_search(site='jable')
+        elif choice == '4':
+            menu_batch_download(site='jable')
+        elif choice == '5':
+            resume_crawl()
+        elif choice == '6':
+            show_crawl_progress()
+
+
+def menu_porn91():
+    """91PORNY 专区：只走搜索免费 m3u8 主线。"""
+    while True:
+        console.print("\n[bold cyan]── 91PORNY ──[/bold cyan]")
+        console.print("  1. 关键词搜索并下载/入队")
+        console.print("  2. 本地库搜索/下载")
+        console.print("  3. 直接链接下载")
+        console.print("  0. 返回")
+
+        choice = Prompt.ask("\n选择", default="0")
+        if choice == '0':
+            break
+        elif choice == '1':
+            porn91_search_and_download()
+        elif choice == '2':
+            menu_search(site='91porny')
+        elif choice == '3':
+            url = Prompt.ask("输入 91PORNY 详情页链接")
+            if url:
+                success, path, size, extra = download_url(url)
+                if success:
+                    console.print(f"[green]✓ 下载完成: {path}[/green]")
+                else:
+                    console.print(f"[red]✗ 下载失败: {extra}[/red]")
+
+
+def menu_crawl():
+    """兼容旧入口：默认进入 Jable 专区。"""
+    menu_jable()
+
+
+def crawl_by_tag():
+    """按标签爬取"""
+    console.print("\n[dim]正在获取标签列表...[/dim]")
+    tags = fetch_tags()
+
+    if not tags:
+        # 手动输入（支持中文）
+        tag_input = Prompt.ask("输入标签（支持中文，如 黑丝）")
+        if not tag_input:
+            return
+        eng_slug = auto_tag(tag_input)
+        if eng_slug != tag_input:
+            console.print(f"[dim]自动识别: {tag_input} → {eng_slug}[/dim]")
+        tags = [{'slug': eng_slug, 'name': tag_input}]
+    else:
+        # 显示热门标签
+        table = Table(title="热门标签", box=box.ROUNDED)
+        table.add_column("#", style="dim", width=4)
+        table.add_column("标签", style="cyan")
+        table.add_column("Slug", style="dim")
+
+        for i, t in enumerate(tags[:30], 1):
+            table.add_row(str(i), t['name'], t['slug'])
+
+        console.print(table)
+        idx = Prompt.ask("\n选择编号（或直接输入slug）", default="1")
+
+        try:
+            idx_num = int(idx) - 1
+            if 0 <= idx_num < len(tags):
+                selected = tags[idx_num]
+            else:
+                return
+        except ValueError:
+            eng_slug = auto_tag(idx)
+            if eng_slug != idx:
+                console.print(f"[dim]自动识别: {idx} → {eng_slug}[/dim]")
+            selected = {'slug': eng_slug, 'name': idx}
+
+        tags = [selected]
+
+    tag = tags[0]
+    console.print(f"\n[green]开始爬取: {tag['name']} ({tag['slug']})[/green]")
+    stop_event.clear()
+
+    with Progress(
+        SpinnerColumn(),
+        TextColumn("[progress.description]{task.description}"),
+        BarColumn(),
+        TextColumn("{task.fields[info]}"),
+        console=console
+    ) as progress:
+        task = progress.add_task(f"爬取 {tag['name']}", total=None, info="准备中...")
+
+        def callback(page, total, new, error=None):
+            if error:
+                progress.update(task, info=f"[red]错误: {error}[/red]")
+            else:
+                progress.update(task, info=f"第{page}页 | 发现{total}个 | 新增{new}个")
+
+        result = crawl_tag(tag['slug'], tag['name'], callback=callback, stop_event=stop_event)
+
+    console.print(f"\n[green]✓ 完成！共{result['pages']}页，发现{result['total_found']}个视频，新增{result['new_added']}个[/green]")
+
+
+def crawl_by_category():
+    """按分类爬取"""
+    console.print("\n[dim]正在获取分类列表...[/dim]")
+    cats = fetch_categories()
+
+    if not cats:
+        slug = Prompt.ask("输入分类slug")
+        if not slug:
+            return
+        cats = [{'slug': slug, 'name': slug}]
+    else:
+        table = Table(title="分类列表", box=box.ROUNDED)
+        table.add_column("#", style="dim", width=4)
+        table.add_column("分类", style="cyan")
+
+        for i, c in enumerate(cats, 1):
+            table.add_row(str(i), c['name'])
+
+        console.print(table)
+        idx = Prompt.ask("\n选择编号", default="1")
+
+        try:
+            selected = cats[int(idx) - 1]
+        except (ValueError, IndexError):
+            return
+
+        cats = [selected]
+
+    cat = cats[0]
+    console.print(f"\n[green]开始爬取分类: {cat['name']}[/green]")
+    stop_event.clear()
+
+    with Progress(
+        SpinnerColumn(),
+        TextColumn("[progress.description]{task.description}"),
+        BarColumn(),
+        TextColumn("{task.fields[info]}"),
+        console=console
+    ) as progress:
+        task = progress.add_task(f"爬取 {cat['name']}", total=None, info="准备中...")
+
+        def callback(page, total, new, error=None):
+            if error:
+                progress.update(task, info=f"[red]错误: {error}[/red]")
+            else:
+                progress.update(task, info=f"第{page}页 | 发现{total}个 | 新增{new}个")
+
+        result = crawl_category(cat['slug'], cat['name'], callback=callback, stop_event=stop_event)
+
+    console.print(f"\n[green]✓ 完成！共{result['pages']}页，发现{result['total_found']}个视频，新增{result['new_added']}个[/green]")
+
+
+def resume_crawl():
+    """继续未完成的爬取"""
+    progress_list = get_crawl_progress()
+    incomplete = [p for p in progress_list if not p['completed']]
+
+    if not incomplete:
+        console.print("[yellow]没有未完成的爬取任务[/yellow]")
+        return
+
+    table = Table(title="未完成的爬取", box=box.ROUNDED)
+    table.add_column("#", style="dim", width=4)
+    table.add_column("标签", style="cyan")
+    table.add_column("已爬页数", style="green")
+    table.add_column("已发现", style="yellow")
+
+    for i, p in enumerate(incomplete, 1):
+        table.add_row(str(i), p['tag_name'] or p['tag'], str(p['last_page']), str(p['total_videos']))
+
+    console.print(table)
+    idx = Prompt.ask("选择继续哪个（a=全部）", default="1")
+
+    if idx.lower() == 'a':
+        targets = incomplete
+    else:
+        try:
+            targets = [incomplete[int(idx) - 1]]
+        except (ValueError, IndexError):
+            return
+
+    for t in targets:
+        tag = t['tag']
+        if tag.startswith('cat:'):
+            crawl_category(tag[4:], t['tag_name'], stop_event=stop_event)
+        else:
+            crawl_tag(tag, t['tag_name'], stop_event=stop_event)
+
+
+def crawl_porn91_search():
+    """91PORNY 搜索免费 m3u8 内容入库。"""
+    adapter = get_adapter('91porny')
+    keyword = Prompt.ask("输入 91PORNY 搜索关键词")
+    if not keyword:
+        return
+    pages = IntPrompt.ask("爬取页数", default=1)
+    probe = Confirm.ask("只保留 m3u8 视频？", default=True)
+    total = 0
+    m3u8_total = 0
+    new = 0
+    skipped = 0
+    for page in range(1, pages + 1):
+        try:
+            videos = adapter.search(keyword, page)
+        except Exception as e:
+            console.print(f"[red]第 {page} 页失败: {e}[/red]")
+            continue
+        total += len(videos)
+        page_new = 0
+        page_m3u8 = 0
+        for v in videos:
+            if probe:
+                ok, detail = adapter.is_m3u8_video(v['url'])
+                if not ok:
+                    skipped += 1
+                    continue
+                v['pay_status'] = 'free'
+                v['is_downloadable'] = 1
+                if detail.get('title'):
+                    v['title'] = detail['title']
+                if detail.get('poster'):
+                    v['thumbnail'] = detail['poster']
+            if add_video(v):
+                new += 1
+                page_new += 1
+            page_m3u8 += 1
+            m3u8_total += 1
+        console.print(f"[green]第 {page} 页: 候选 {len(videos)} 个，m3u8 {page_m3u8} 个，新增 {page_new} 个[/green]")
+        time.sleep(float(get_setting('request_delay') or 2))
+    console.print(f"[green]✓ 91PORNY 搜索完成：候选 {total} 个，m3u8 {m3u8_total} 个，新增 {new} 个，跳过 {skipped} 个[/green]")
+
+
+def _porn91_video_key(video):
+    """91 视频唯一键：优先 code，其次 url。"""
+    code = (video.get('code') or '').strip().lower()
+    if code:
+        return f"code:{code}"
+    return f"url:{(video.get('url') or '').strip().lower()}"
+
+
+def _find_existing_porn91_video(video):
+    """按 code/url 查已存在的 91 记录。"""
+    conn = get_conn()
+    try:
+        if video.get('url'):
+            row = conn.execute("SELECT * FROM videos WHERE site='91porny' AND url=? LIMIT 1", (video.get('url'),)).fetchone()
+            if row:
+                return dict(row)
+        if video.get('code'):
+            row = conn.execute("SELECT * FROM videos WHERE site='91porny' AND code=? LIMIT 1", (video.get('code'),)).fetchone()
+            if row:
+                return dict(row)
+        return None
+    finally:
+        conn.close()
+
+
+def _has_active_queue(video_id):
+    """是否已经在待下载/下载中队列。"""
+    conn = get_conn()
+    try:
+        row = conn.execute(
+            "SELECT status FROM download_queue WHERE video_id=? AND status IN ('pending','downloading','retrying') LIMIT 1",
+            (video_id,)
+        ).fetchone()
+        return bool(row)
+    finally:
+        conn.close()
+
+
+def _add_or_get_porn91_video(video):
+    """保存搜索结果；已存在则直接返回旧记录，不重复入库。"""
+    existing = _find_existing_porn91_video(video)
+    if existing:
+        return existing, False
+    data = {
+        'site': '91porny',
+        'code': video.get('code') or '',
+        'title': video.get('title') or video.get('code') or '91PORNY',
+        'url': video.get('url') or '',
+        'tags': video.get('tags') or '91porny,免费',
+        'thumbnail': video.get('thumbnail') or video.get('poster') or '',
+        'duration': video.get('duration') or '',
+        'actress': video.get('actress') or '',
+        'publish_date': video.get('publish_date') or '',
+        'pay_status': 'free',
+        'is_downloadable': 1,
+    }
+    add_video(data)
+    return _find_existing_porn91_video(data), True
+
+
+def porn91_search_and_download(keyword=None, pages=None, limit=None, background=None):
+    """91PORNY 简化流程：关键词搜索 -> 显示页数/候选 -> 去重 -> 指定数量直接下载/入队。
+
+    不再先爬元数据入库，也不逐条详情页探测；下载器实际下载时再解析播放源。
+    """
+    adapter = get_adapter('91porny')
+    keyword = keyword if keyword is not None else Prompt.ask("输入 91PORNY 搜索关键词")
+    if not keyword:
+        return {'total': 0, 'pages_found': 0, 'added': 0, 'queued': 0, 'downloaded': 0, 'failed': 0, 'skipped': 0, 'duplicates': 0, 'already_done': 0, 'already_queued': 0}
+    max_pages = int(pages if pages is not None else 50)
+    try:
+        all_videos, meta = adapter.search_all_pages(keyword, max_pages=max_pages)
+    except Exception as e:
+        console.print(f"[red]搜索失败: {e}[/red]")
+        return {'total': 0, 'pages_found': 0, 'added': 0, 'queued': 0, 'downloaded': 0, 'failed': 1, 'skipped': 0, 'duplicates': 0, 'already_done': 0, 'already_queued': 0}
+
+    result = {'total': len(all_videos), 'pages_found': int(meta.get('pages_found') or 0), 'added': 0, 'queued': 0, 'downloaded': 0, 'failed': 0, 'skipped': 0, 'duplicates': 0, 'already_done': 0, 'already_queued': 0}
+    console.print(f"[cyan]搜索完成：共 {result['pages_found']} 页，候选视频 {result['total']} 个[/cyan]")
+
+    if limit is None:
+        if result['total'] <= 0:
+            console.print("[yellow]没有搜索到视频[/yellow]")
+            return result
+        limit = IntPrompt.ask("下载/入队多少个", default=min(20, result['total']))
+    limit = max(0, min(int(limit), result['total']))
+    background = bool(background if background is not None else Confirm.ask("加入后台队列下载？", default=True))
+
+    selected = []
+    seen = set()
+    for v in all_videos:
+        key = _porn91_video_key(v)
+        if not v.get('url') or key in seen:
+            result['duplicates'] += 1
+            continue
+        seen.add(key)
+
+        row, inserted = _add_or_get_porn91_video(v)
+        if not row:
+            result['skipped'] += 1
+            continue
+        if inserted:
+            result['added'] += 1
+        if row.get('downloaded'):
+            result['already_done'] += 1
+            continue
+        if _has_active_queue(row['id']):
+            result['already_queued'] += 1
+            continue
+        if len(selected) >= limit:
+            break
+        selected.append({'row': row, 'search': v})
+
+    console.print(f"[cyan]本次选择 {len(selected)} 个；跳过已下载 {result['already_done']}、已在队列 {result['already_queued']}、重复 {result['duplicates']}[/cyan]")
+    if not selected:
+        console.print("[yellow]没有新的可下载视频（可能都已下载或已在队列）[/yellow]")
+        return result
+
+    if background:
+        for item in selected:
+            add_to_queue(item['row']['id'])
+            result['queued'] += 1
+        if result['queued'] and not is_daemon_running():
+            start_background_daemon()
+        console.print(f"[green]✓ 已入队 {result['queued']} 个；新增记录 {result['added']}；跳过已下载 {result['already_done']}、已在队列 {result['already_queued']}、重复 {result['duplicates']}[/green]")
+        return result
+
+    segment_concurrency = int(get_setting('segment_concurrency') or get_setting('concurrency') or 10)
+    for idx, item in enumerate(selected, 1):
+        row = item['row']
+        video = {
+            'id': row['id'],
+            'site': '91porny',
+            'url': row['url'],
+            'code': row['code'],
+            'title': row['title'],
+            'tags': row.get('tags', ''),
+        }
+        console.print(f"[{idx}/{len(selected)}] 下载 {video['code']} - {video['title'][:30]}")
+        add_to_queue(row['id'])
+        qid = None
+        q = get_queue(status='pending', limit=100)
+        match = [x for x in q if x['video_id'] == row['id']]
+        if match:
+            qid = match[0]['id']
+            update_queue_status(qid, 'downloading')
+        update_download_progress(row['id'], 0, '', '', 'downloading')
+
+        def cb(percent, speed, eta, vid=row['id']):
+            update_download_progress(vid, percent, speed, eta, 'downloading')
+
+        success, path, size, extra = fast_download_video(video, cb, concurrency=segment_concurrency)
+        if success:
+            result['downloaded'] += 1
+            if qid:
+                update_queue_status(qid, 'done')
+            mark_downloaded(row['id'], path, size)
+            update_download_progress(row['id'], 100, '完成', '', 'done')
+            console.print(f"  [green]✓ {os.path.basename(path)}[/green]")
+        else:
+            result['failed'] += 1
+            status = 'skipped' if any(x in str(extra) for x in ['跳过', '不可下载', 'data-src']) else 'failed'
+            if qid:
+                update_queue_status(qid, status, str(extra))
+            update_download_progress(row['id'], 0, '', str(extra), status)
+            console.print(f"  [red]✗ {extra}[/red]")
+    console.print(f"[green]✓ 完成：下载 {result['downloaded']}，失败 {result['failed']}，跳过已下载 {result['already_done']}、已在队列 {result['already_queued']}、重复 {result['duplicates']}[/green]")
+    return result
+
+
+def show_crawl_progress():
+    """显示爬取进度"""
+    progress_list = get_crawl_progress()
+    if not progress_list:
+        console.print("[yellow]还没有爬取记录[/yellow]")
+        return
+
+    table = Table(title="爬取进度", box=box.ROUNDED)
+    table.add_column("标签", style="cyan")
+    table.add_column("页数", style="green")
+    table.add_column("视频数", style="yellow")
+    table.add_column("状态", style="bold")
+    table.add_column("更新时间", style="dim")
+
+    for p in progress_list:
+        status = "[green]✓ 完成[/green]" if p['completed'] else "[yellow]进行中[/yellow]"
+        table.add_row(p['tag_name'] or p['tag'], str(p['last_page']),
+                      str(p['total_videos']), status, p['updated_at'])
+
+    console.print(table)
+
+
+def menu_search(site=''):
+    """搜索视频，可按站点过滤。"""
+    label = f"{site} " if site else ""
+    keyword = Prompt.ask(f"\n[cyan]{label}搜索[/cyan]（关键词/番号/演员）")
+    if not keyword:
+        return
+
+    results = search_videos(keyword=keyword, site=site, limit=20)
+    total = count_videos(keyword=keyword, site=site)
+
+    if not results:
+        console.print(f"[yellow]未找到 '{keyword}' 相关视频[/yellow]")
+        return
+
+    title = f"{label}搜索: {keyword} ({total}个结果)"
+    display_video_list(results, title)
+
+
+def display_video_list(videos, title="视频列表"):
+    """显示视频列表并支持操作"""
+    table = Table(title=title, box=box.ROUNDED)
+    table.add_column("#", style="dim", width=4)
+    table.add_column("来源", style="magenta", width=8)
+    table.add_column("番号", style="cyan", width=14)
+    table.add_column("标题", style="white", max_width=30)
+    table.add_column("时长", style="green", width=10)
+    table.add_column("大小/状态", width=10)
+    table.add_column("标签", style="dim", max_width=12)
+
+    for i, v in enumerate(videos, 1):
+        if v['downloaded'] and v['file_size']:
+            size_mb = v['file_size'] / (1024 * 1024)
+            if size_mb > 1024:
+                status = f"[green]{size_mb/1024:.1f}GB[/green]"
+            else:
+                status = f"[green]{size_mb:.0f}MB[/green]"
+        elif v['downloaded']:
+            status = "[green]✓[/green]"
+        elif v['favorited']:
+            status = "[yellow]⭐[/yellow]"
+        else:
+            status = ""
+        table.add_row(str(i), v.get('site', 'jable'), v['code'] or '-', v['title'][:30],
+                      v['duration'], status, v['tags'][:12])
+
+    console.print(table)
+    console.print("[dim]操作: 编号=详情 | d编号=下载 | f编号=收藏 | q=返回[/dim]")
+
+    while True:
+        action = Prompt.ask("操作", default="q")
+        if action == 'q':
+            break
+        elif action.startswith('d'):
+            try:
+                idx = int(action[1:]) - 1
+                do_download(videos[idx])
+            except (ValueError, IndexError):
+                console.print("[red]无效编号[/red]")
+        elif action.startswith('f'):
+            try:
+                idx = int(action[1:]) - 1
+                toggle_favorite(videos[idx]['id'])
+                console.print(f"[green]已切换收藏: {videos[idx]['code']}[/green]")
+            except (ValueError, IndexError):
+                console.print("[red]无效编号[/red]")
+        else:
+            try:
+                idx = int(action) - 1
+                show_video_detail(videos[idx])
+            except (ValueError, IndexError):
+                console.print("[red]无效输入[/red]")
+
+
+def show_video_detail(video):
+    """显示视频详情"""
+    info = Table(show_header=False, box=box.SIMPLE)
+    info.add_column(style="bold cyan", width=10)
+    info.add_column(style="white")
+
+    info.add_row("来源", video.get('site', 'jable'))
+    info.add_row("番号", video['code'] or '-')
+    info.add_row("标题", video['title'])
+    info.add_row("时长", video['duration'])
+    info.add_row("标签", video['tags'])
+    info.add_row("演员", video['actress'] or '-')
+    info.add_row("链接", video['url'])
+    info.add_row("已下载", "是" if video['downloaded'] else "否")
+    info.add_row("收藏", "是" if video['favorited'] else "否")
+
+    console.print(Panel(info, title=f"[bold]{video['code']}[/bold]", border_style="cyan"))
+
+    action = Prompt.ask("[d]下载 [f]收藏 [q]返回", default="q")
+    if action == 'd':
+        do_download(video)
+    elif action == 'f':
+        toggle_favorite(video['id'])
+        console.print("[green]已切换收藏状态[/green]")
+
+
+def do_download(video):
+    """执行下载（多线程、前台或后台）"""
+    console.print(f"\n[cyan]下载: {video['code']} - {video['title'][:30]}[/cyan]")
+    method = Prompt.ask("模式", choices=["f", "b", "o", "q"], default="f",
+                        show_choices=True)
+    if method == 'q':
+        return
+    
+    dl_func = fast_download_video  # 默认多线程高速模式
+    
+    if method == 'b':
+        # 后台下载
+        add_to_queue(video['id'])
+        if not is_daemon_running():
+            start_background_daemon()
+        console.print(f"[green]✓ 已加入后台下载队列 ({video['code']})[/green]")
+        return
+    if method == 'o':
+        dl_func = download_video  # 旧版ffmpeg模式
+
+    # 前台下载（默认多线程高速）
+    with Progress(
+        SpinnerColumn(),
+        TextColumn("[progress.description]{task.description}"),
+        BarColumn(),
+        TextColumn("{task.fields[info]}"),
+        TimeRemainingColumn(),
+        console=console
+    ) as progress:
+        task = progress.add_task("下载中", total=100, info="获取链接...")
+
+        def callback(percent, speed, eta):
+            progress.update(task, completed=percent, info=f"{speed} ETA:{eta}")
+
+        success, path, size, extra = dl_func(video, callback)
+
+    if success:
+        size_mb = size / (1024 * 1024)
+        console.print(f"[green]✓ 下载完成: {path} ({size_mb:.1f}MB, {extra})[/green]")
+    else:
+        console.print(f"[red]✗ 下载失败: {extra}[/red]")
+
+
+def select_batch_videos(raw_query, site='', limit=10):
+    """批量选择视频：Jable 走标签；91PORNY 走关键词/标题/code，不做 Jable 标签翻译。"""
+    if site == '91porny':
+        return search_videos(keyword=raw_query, site=site, limit=limit)
+    tag = auto_tag(raw_query)
+    return search_videos(tag=tag, site=site, limit=limit)
+
+
+def menu_batch_download(site=''):
+    """批量下载，可按站点过滤。91PORNY 使用关键词搜索，Jable 使用标签。"""
+    title = "下载队列" if not site else f"{site} 批量下载"
+    console.print(f"\n[bold cyan]── {title} ──[/bold cyan]")
+    label = "按关键词批量下载" if site == '91porny' else "按标签批量下载"
+    console.print(f"  1. {label}")
+    console.print("  2. 下载所有收藏")
+    console.print("  3. 处理下载队列")
+    console.print("  4. 查看队列状态")
+    console.print("  0. 返回")
+
+    choice = Prompt.ask("\n选择", default="0")
+
+    if choice == '1':
+        raw_query = Prompt.ask("输入关键词/标题/code" if site == '91porny' else "输入标签（支持中文）")
+        if not raw_query:
+            return
+        if site != '91porny':
+            tag = auto_tag(raw_query)
+            if tag != raw_query:
+                console.print(f"[dim]自动识别: {raw_query} → {tag}[/dim]")
+        limit = IntPrompt.ask("下载数量", default=10)
+        videos = select_batch_videos(raw_query, site=site, limit=limit)
+        if not videos:
+            hint = "该关键词下没有已入库视频，先用 91PORNY 搜索免费 m3u8 入库" if site == '91porny' else "该标签下没有视频，先爬取元数据"
+            console.print(f"[yellow]{hint}[/yellow]")
+            return
+        queued = 0
+        skipped_downloaded = 0
+        for v in videos:
+            if not v['downloaded']:
+                add_to_queue(v['id'])
+                queued += 1
+            else:
+                skipped_downloaded += 1
+        console.print(f"[green]已找到 {len(videos)} 个，加入队列 {queued} 个，已下载跳过 {skipped_downloaded} 个[/green]")
+        bg = Confirm.ask("后台下载？", default=True)
+        if bg:
+            if queued and not is_daemon_running():
+                start_background_daemon()
+            console.print("[green]后台下载已启动，可随时查看进度[/green]" if queued else "[yellow]没有新任务需要下载[/yellow]")
+        else:
+            start_queue_download()
+
+    elif choice == '2':
+        favs = get_favorites(limit=100)
+        if site:
+            favs = [f for f in favs if f.get('site', 'jable') == site]
+        undl = [f for f in favs if not f['downloaded']]
+        if not undl:
+            console.print("[yellow]收藏夹没有未下载的视频[/yellow]")
+            return
+        for v in undl:
+            add_to_queue(v['id'], priority=1)
+        console.print(f"[green]已加入队列 {len(undl)} 个收藏视频[/green]")
+        start_queue_download()
+
+    elif choice == '3':
+        bg = Confirm.ask("后台下载？", default=True)
+        if bg:
+            if not is_daemon_running():
+                start_background_daemon()
+            console.print("[green]后台下载已启动[/green]")
+        else:
+            start_queue_download()
+
+    elif choice == '4':
+        show_queue_status()
+
+
+def show_queue_status():
+    """查看队列状态（含后台进度）"""
+    if not is_daemon_running():
+        recovered = recover_incomplete_downloads(reason='daemon is not running; recovered stale downloading task')
+        if recovered.get('pending') or recovered.get('failed'):
+            console.print(f"[yellow]已回收残留下载任务：重新排队 {recovered['pending']}，标记失败 {recovered['failed']}[/yellow]")
+
+    pending = get_queue(status='pending')
+    downloading = get_queue(status='downloading')
+    done = get_queue(status='done')
+    failed = get_queue(status='failed')
+
+    table = Table(title="下载队列状态", box=box.ROUNDED)
+    table.add_column("状态", style="bold", width=14)
+    table.add_column("数量", style="green")
+    table.add_column("详情", style="dim")
+
+    table.add_row("[cyan]待下载[/cyan]", str(len(pending)), "")
+    table.add_row("[yellow]下载中[/yellow]", str(len(downloading)), "")
+    table.add_row("[green]已完成[/green]", str(len(done)), "")
+    table.add_row("[red]失败[/red]", str(len(failed)), "")
+
+    # 后台实时进度（SQLite跨进程可见）
+    progress_rows = get_download_progress()
+    active_progress = [p for p in progress_rows if p.get('status') in ('downloading', 'retrying')]
+    if active_progress:
+        pnl = "\n[bold cyan]实时下载进度:[/bold cyan]"
+        for info in active_progress[:10]:
+            pnl += f"\n  #{info['video_id']}: [green]{info['percent']}%[/green] | {info['speed']} | ETA:{info['eta']} | {info['status']}"
+        console.print(pnl)
+
+    console.print(table)
+
+    if failed:
+        conn = get_conn()
+        rows = conn.execute(
+            "SELECT dq.error_msg, v.code FROM download_queue dq JOIN videos v ON dq.video_id=v.id WHERE dq.status='failed' LIMIT 5"
+        ).fetchall()
+        conn.close()
+        for r in rows:
+            console.print(f"  [dim]{r['code']}: {r['error_msg']}[/dim]")
+
+    # 操作
+    if pending:
+        s = Prompt.ask("[s]启动下载 [c]清空失败 [q]返回", default="q")
+        if s == 's':
+            bg = Confirm.ask("后台下载？", default=True)
+            if bg:
+                if not is_daemon_running():
+                    start_background_daemon()
+                console.print("[green]后台下载已启动[/green]")
+            else:
+                start_queue_download()
+        elif s == 'c':
+            conn = get_conn()
+            conn.execute("DELETE FROM download_queue WHERE status='failed'")
+            conn.commit()
+            conn.close()
+            console.print("[green]已清空失败记录[/green]")
+    elif is_daemon_running():
+        s = Prompt.ask("[s]查看实时进度 [q]返回", default="q")
+        if s == 's':
+            progress = get_download_progress()
+            for info in progress:
+                print(f"  #{info['video_id']}: {info['percent']}% | {info['speed']} | ETA:{info['eta']} | {info['status']}")
+
+
+def start_queue_download():
+    """启动队列下载"""
+    queue = get_queue(status='pending', limit=10000)
+    if not queue:
+        console.print("[yellow]队列为空[/yellow]")
+        return
+
+    console.print(f"[green]开始下载队列 ({len(queue)}个待下载)[/green]")
+    console.print("[dim]按 Ctrl+C 停止[/dim]")
+    stop_event.clear()
+
+    for i, item in enumerate(queue, 1):
+        if stop_event.is_set():
+            console.print("[yellow]已停止[/yellow]")
+            break
+
+        video = {
+            'id': item['video_id'],
+            'url': item['url'],
+            'code': item['code'],
+            'title': item['title'],
+            'tags': item['tags'],
+        }
+
+        console.print(f"\n[{i}/{len(queue)}] {video['code']} - {video['title'][:30]}")
+        update_queue_status(item['id'], 'downloading')
+
+        with Progress(
+            SpinnerColumn(), BarColumn(), TextColumn("{task.fields[info]}"),
+            console=console
+        ) as progress:
+            task = progress.add_task("", total=100, info="...")
+
+            def callback(percent, speed, eta):
+                progress.update(task, completed=percent, info=f"{speed}")
+
+            success, path, size, error = fast_download_video(video, callback)
+
+        if success:
+            update_queue_status(item['id'], 'done')
+            console.print(f"  [green]✓ {os.path.basename(path)}[/green]")
+        else:
+            update_queue_status(item['id'], 'failed', error)
+            console.print(f"  [red]✗ {error}[/red]")
+
+        time.sleep(1)
+
+
+def menu_stats():
+    """查看统计"""
+    stats = get_stats()
+
+    table = Table(title="数据统计", box=box.ROUNDED)
+    table.add_column("项目", style="cyan")
+    table.add_column("数值", style="bold white")
+
+    table.add_row("总视频数", str(stats['total_videos']))
+    table.add_row("已下载", str(stats['downloaded']))
+    table.add_row("收藏数", str(stats['favorited']))
+    table.add_row("队列待下载", str(stats['queue_pending']))
+    table.add_row("队列已完成", str(stats['queue_done']))
+    size_gb = stats['total_size'] / (1024**3) if stats['total_size'] else 0
+    table.add_row("已用空间", f"{size_gb:.2f} GB")
+
+    console.print(table)
+
+    if stats['top_tags']:
+        tag_table = Table(title="热门标签 TOP10", box=box.SIMPLE)
+        tag_table.add_column("标签", style="cyan")
+        tag_table.add_column("数量", style="green")
+        for tag, cnt in stats['top_tags']:
+            tag_table.add_row(tag, str(cnt))
+        console.print(tag_table)
+
+
+def menu_favorites():
+    """收藏夹"""
+    favs = get_favorites()
+    if not favs:
+        console.print("[yellow]收藏夹为空[/yellow]")
+        return
+    display_video_list(favs, f"收藏夹 ({len(favs)}个)")
+
+
+def menu_history():
+    """历史记录（已下载）"""
+    conn = get_conn()
+    rows = conn.execute(
+        "SELECT * FROM videos WHERE downloaded=1 ORDER BY download_time DESC LIMIT 50"
+    ).fetchall()
+    conn.close()
+
+    if not rows:
+        console.print("[yellow]还没有下载记录[/yellow]")
+        return
+
+    videos = [dict(r) for r in rows]
+    display_video_list(videos, f"下载历史 ({len(videos)}个)")
+
+
+def menu_random():
+    """随机推荐"""
+    raw_tag = Prompt.ask("限定标签（留空=全部，支持中文）", default="")
+    tag = auto_tag(raw_tag) if raw_tag else ''
+    if tag != raw_tag and raw_tag:
+        console.print(f"[dim]自动识别: {raw_tag} → {tag}[/dim]")
+    count = IntPrompt.ask("推荐数量", default=5)
+
+    videos = get_random_videos(count, tag)
+    if not videos:
+        console.print("[yellow]数据库为空，先爬取元数据[/yellow]")
+        return
+
+    display_video_list(videos, "🎲 随机推荐")
+
+
+def menu_tools():
+    """工具箱：自检、清理、后台管理、直接链接下载。"""
+    while True:
+        console.print("\n[bold cyan]── 工具箱 ──[/bold cyan]")
+        console.print("  1. 系统自检 doctor")
+        console.print("  2. 重试失败任务")
+        console.print("  3. 清理临时文件")
+        console.print("  4. 后台下载管理")
+        console.print("  5. 直接链接下载")
+        console.print("  6. 查看日志")
+        console.print("  0. 返回")
+
+        choice = Prompt.ask("\n选择", default="0")
+        if choice == '0':
+            break
+        elif choice == '1':
+            result = print_doctor()
+            if result['ok']:
+                console.print("[green]✓ 环境正常[/green]")
+            else:
+                console.print("[red]✗ 存在异常，请看上面的 FAIL 项[/red]")
+        elif choice == '2':
+            count = retry_failed()
+            console.print(f"[green]已重置失败任务: {count} 个[/green]")
+        elif choice == '3':
+            if Confirm.ask("确认清理临时文件？", default=True):
+                result = clean_temp_files()
+                console.print(f"[green]已清理 {result['removed']} 项，释放 {result['freed']} 字节[/green]")
+        elif choice == '4':
+            menu_daemon()
+        elif choice == '5':
+            url = Prompt.ask("输入视频详情链接（支持 Jable / 91PORNY 免费内容）")
+            if url:
+                success, path, size, extra = download_url(url)
+                if success:
+                    console.print(f"[green]✓ 下载完成: {path}[/green]")
+                else:
+                    console.print(f"[red]✗ 下载失败: {extra}[/red]")
+        elif choice == '6':
+            daemon_cli('logs')
+
+
+def menu_daemon():
+    """后台 daemon 管理。"""
+    while True:
+        status = "运行中" if is_daemon_running() else "已停止"
+        console.print(f"\n[bold cyan]── 后台下载管理 ──[/bold cyan] [dim]当前: {status}[/dim]")
+        console.print("  1. 查看状态")
+        console.print("  2. 启动后台")
+        console.print("  3. 停止后台")
+        console.print("  4. 查看日志")
+        console.print("  0. 返回")
+
+        choice = Prompt.ask("\n选择", default="0")
+        if choice == '0':
+            break
+        elif choice == '1':
+            daemon_cli('status')
+        elif choice == '2':
+            daemon_cli('start')
+        elif choice == '3':
+            daemon_cli('stop')
+        elif choice == '4':
+            daemon_cli('logs')
+
+
+def menu_settings():
+    """设置"""
+    while True:
+        console.print("\n[bold cyan]── 设置 ──[/bold cyan]")
+        settings = [
+            ('download_dir', '下载目录'),
+            ('queue_workers', '队列并发数'),
+            ('segment_concurrency', '单视频分片并发数'),
+            ('request_delay', '请求间隔(秒)'),
+            ('max_retries', '最大重试次数'),
+            ('speed_limit', '限速(MB/s, 0=不限)'),
+            ('proxy', '代理(socks5://... 或留空)'),
+            ('auto_organize', '自动按标签分目录(1/0)'),
+            ('segment_retries', '分片重试次数'),
+            ('direct_concurrency', '直链并发数'),
+            ('direct_chunk_mb', '直链分块大小MB'),
+        ]
+
+        for i, (key, label) in enumerate(settings, 1):
+            val = get_setting(key)
+            console.print(f"  {i}. {label}: [green]{val}[/green]")
+        console.print("  0. 返回")
+
+        choice = Prompt.ask("\n修改哪项", default="0")
+        if choice == '0':
+            break
+
+        try:
+            idx = int(choice) - 1
+            key, label = settings[idx]
+            new_val = Prompt.ask(f"新的{label}", default=get_setting(key))
+            set_setting(key, new_val)
+            console.print(f"[green]✓ 已更新 {label} = {new_val}[/green]")
+        except (ValueError, IndexError):
+            console.print("[red]无效选择[/red]")
+
+
+
+def run_doctor():
+    """自检运行环境，返回结构化结果。"""
+    init_db()
+    checks = {
+        'ffmpeg': shutil.which('ffmpeg') is not None,
+        'ffprobe': shutil.which('ffprobe') is not None,
+        'database': os.path.exists(DB_PATH),
+        'download_dir': bool(get_setting('download_dir')),
+        'bs4': False,
+    }
+    try:
+        import bs4  # noqa
+        checks['bs4'] = True
+    except Exception:
+        checks['bs4'] = False
+    return {'ok': all(checks.values()), 'checks': checks}
+
+
+def print_doctor():
+    result = run_doctor()
+    for k, v in result['checks'].items():
+        print(f"{k}: {'OK' if v else 'FAIL'}")
+    print('overall:', 'OK' if result['ok'] else 'FAIL')
+    return result
+
+
+def retry_failed():
+    """把失败队列重置为 pending。"""
+    conn = get_conn()
+    rows = conn.execute("SELECT id FROM download_queue WHERE status='failed'").fetchall()
+    for row in rows:
+        conn.execute("UPDATE download_queue SET status='pending', retry_count=0, error_msg='' WHERE id=?", (row['id'],))
+    conn.commit()
+    conn.close()
+    return len(rows)
+
+
+def clean_temp_files(download_dir=None, pid_file=None):
+    """清理临时下载文件和无效PID。"""
+    download_dir = download_dir or get_setting('download_dir') or os.path.join(os.path.dirname(os.path.abspath(__file__)), 'videos')
+    pid_file = pid_file or DAEMON_PID_FILE
+    removed = 0
+    freed = 0
+    root = Path(download_dir)
+    if root.exists():
+        patterns = ['*.parts', '*.dlpart', '*.downloading']
+        for pattern in patterns:
+            for path in root.rglob(pattern):
+                try:
+                    if path.is_dir():
+                        size = sum(p.stat().st_size for p in path.rglob('*') if p.is_file())
+                        shutil.rmtree(path)
+                    else:
+                        size = path.stat().st_size
+                        path.unlink()
+                    removed += 1
+                    freed += size
+                except OSError:
+                    pass
+    if pid_file and os.path.exists(pid_file) and not is_daemon_running():
+        try:
+            os.remove(pid_file)
+            removed += 1
+        except OSError:
+            pass
+    return {'removed': removed, 'freed': freed}
+
+
+def download_url(url):
+    """直接下载视频详情链接，不要求先入库。"""
+    try:
+        adapter = detect_adapter(url)
+    except Exception as e:
+        return False, '', 0, str(e)
+
+    if adapter.site == 'jable':
+        m = re.search(r'/videos/([^/]+)/?', url)
+        if not m:
+            return False, '', 0, '无效Jable视频链接'
+        code = m.group(1).upper()
+        # Jable 保持旧路径，便于现有测试和旧调用 monkeypatch。
+        detail = fetch_video_detail(url)
+    else:
+        detail = adapter.fetch_video_detail(url)
+        if detail.get('is_downloadable') is False:
+            return False, '', 0, detail.get('skip_reason') or '内容不可下载'
+        code = adapter.extract_code(url) if hasattr(adapter, 'extract_code') else adapter.site
+
+    video = {
+        'id': 0,
+        'site': adapter.site,
+        'url': url,
+        'code': code,
+        'title': detail.get('title') or code,
+        'tags': detail.get('tags', adapter.site),
+    }
+    return fast_download_video(video)
+
+
+def daemon_cli(action):
+    if action == 'start':
+        ok = start_background_daemon()
+        print('started' if ok else 'failed')
+    elif action == 'stop':
+        stop_background_daemon()
+        print('stopped')
+    elif action == 'status':
+        print('running' if is_daemon_running() else 'stopped')
+    elif action == 'logs':
+        log_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'logs', 'jdl.log')
+        if os.path.exists(log_path):
+            with open(log_path, encoding='utf-8') as f:
+                lines = f.readlines()[-50:]
+            print(''.join(lines), end='')
+        else:
+            print('no logs')
+    else:
+        print('用法: jdl daemon [start|stop|status|logs]')
+
+def cli_mode():
+    """命令行模式"""
+    if len(sys.argv) < 2:
+        return False
+
+    cmd = sys.argv[1]
+
+    if cmd == 'crawl':
+        raw_tag = sys.argv[2] if len(sys.argv) > 2 else 'pantyhose'
+        tag = auto_tag(raw_tag)
+        if tag != raw_tag:
+            print(f"自动识别: {raw_tag} → {tag}")
+        init_db()
+        print(f"爬取: {tag}")
+        result = crawl_tag(tag, raw_tag if tag != raw_tag else tag)
+        print(f"完成: {result['total_found']}个视频, 新增{result['new_added']}个")
+
+    elif cmd == 'search':
+        keyword = ' '.join(sys.argv[2:])
+        init_db()
+        results = search_videos(keyword=keyword)
+        for v in results:
+            print(f"{v['code']:15} {v['title'][:40]:40} {v['duration']}")
+
+    elif cmd == 'download':
+        code = sys.argv[2] if len(sys.argv) > 2 else ''
+        if not code:
+            print("用法: jdl download <番号>")
+            return True
+        init_db()
+        results = search_videos(keyword=code, limit=1)
+        if results:
+            success, path, size, error = fast_download_video(results[0])
+            print(f"{'成功' if success else '失败'}: {path or error}")
+        else:
+            print(f"未找到: {code}")
+
+    elif cmd == 'status':
+        init_db()
+        stats = get_stats()
+        print(f"总视频: {stats['total_videos']} | 已下载: {stats['downloaded']} | 收藏: {stats['favorited']}")
+
+    elif cmd == 'doctor':
+        print_doctor()
+
+    elif cmd == 'retry-failed':
+        init_db()
+        count = retry_failed()
+        print(f"已重试失败任务: {count}")
+
+    elif cmd == 'clean':
+        init_db()
+        result = clean_temp_files()
+        print(f"已清理: {result['removed']} 项, 释放 {result['freed']} 字节")
+
+    elif cmd == 'download-url':
+        url = sys.argv[2] if len(sys.argv) > 2 else ''
+        if not url:
+            print("用法: jdl download-url <视频详情链接>")
+            return True
+        init_db()
+        success, path, size, error = download_url(url)
+        print(f"{'成功' if success else '失败'}: {path or error}")
+
+    elif cmd == 'daemon':
+        action = sys.argv[2] if len(sys.argv) > 2 else 'status'
+        init_db()
+        daemon_cli(action)
+
+    elif cmd == 'list':
+        tag = sys.argv[2] if len(sys.argv) > 2 else ''
+        init_db()
+        results = search_videos(tag=tag, limit=20)
+        for v in results:
+            print(f"{v['code']:15} {v['title'][:40]}")
+
+    else:
+        print("用法: jdl [crawl|search|download|download-url|list|status|doctor|retry-failed|clean|daemon] [参数]")
+
+    return True
+
+
+def main():
+    """主入口"""
+    # 命令行模式
+    if cli_mode():
+        return
+
+    # 交互模式
+    init_db()
+    
+    # 启动时自动恢复卡死的下载项
+    conn = get_conn()
+    stuck = conn.execute("SELECT COUNT(*) FROM download_queue WHERE status='downloading'").fetchone()[0]
+    if stuck:
+        conn.execute("UPDATE download_queue SET status='pending' WHERE status='downloading'")
+        console.print(f"[yellow]恢复 {stuck} 个卡死的下载项[/yellow]")
+    conn.commit()
+    conn.close()
+    
+    clear_screen()
+    show_banner()
+
+    while True:
+        show_main_menu()
+        choice = Prompt.ask("\n[bold cyan]>[/bold cyan]", default="0")
+
+        if choice == '0':
+            if is_daemon_running():
+                stop_it = Confirm.ask("后台下载仍在运行，是否停止？", default=False)
+                if stop_it:
+                    stop_background_daemon()
+                    console.print("[yellow]已停止后台下载[/yellow]")
+                else:
+                    console.print("[green]后台下载继续运行[/green]")
+            console.print("[dim]再见！[/dim]")
+            break
+        elif choice == '1':
+            menu_jable()
+        elif choice == '2':
+            menu_porn91()
+        elif choice == '3':
+            menu_search()
+        elif choice == '4':
+            menu_batch_download()
+        elif choice == '5':
+            menu_stats()
+        elif choice == '6':
+            menu_favorites()
+        elif choice == '7':
+            menu_history()
+        elif choice == '8':
+            menu_random()
+        elif choice == '9':
+            menu_settings()
+        elif choice == '10':
+            menu_tools()
+        else:
+            console.print("[red]无效选择[/red]")
+
+
+if __name__ == '__main__':
+    main()

@@ -1,0 +1,103 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+    <title>下载队列</title>
+    <link rel="stylesheet" href="/static/css/style.css">
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+</head>
+<body>
+    <div class="app bili-app">
+        <main class="feed-main">
+            <header class="feed-topbar">
+                <a class="avatar" href="/"><i class="fas fa-arrow-left"></i></a>
+                <div class="feed-search fake-search"><i class="fas fa-download"></i><span>下载队列 · {{ queue.daemon }}</span></div>
+            </header>
+
+            <section class="hero-banner">
+                <div class="hero-bg"></div>
+                <div class="hero-content">
+                    <div class="hero-kicker">Queue · {{ queue.daemon }}</div>
+                    <h1>{{ queue.pending + queue.downloading + queue.retrying }} 个当前任务</h1>
+                    <p>完成 {{ queue.done }} · 失败历史 {{ queue.failed }} · 已跳过 {{ queue.skipped }}</p>
+                </div>
+            </section>
+
+            <section class="queue-actions">
+                {% if queue.pending + queue.retrying > 0 %}
+                <form method="post" action="/api/queue/control"><input type="hidden" name="action" value="start"><button class="qa-primary"><i class="fas fa-play"></i> 开始下载</button></form>
+                {% endif %}
+                {% if queue.daemon == 'running' or queue.downloading > 0 %}
+                <form method="post" action="/api/queue/control"><input type="hidden" name="action" value="stop"><button><i class="fas fa-stop"></i> 停止</button></form>
+                {% endif %}
+                {% if queue.failed > 0 %}
+                <form method="post" action="/api/queue/control"><input type="hidden" name="action" value="retry_failed"><button><i class="fas fa-rotate"></i> 重试失败</button></form>
+                <form method="post" action="/api/queue/control" onsubmit="return confirm('确定清理失败历史？会把 failed 改成 skipped，避免继续显示。')"><input type="hidden" name="action" value="clear_failed"><button><i class="fas fa-broom"></i> 清理失败历史</button></form>
+                {% endif %}
+                {% if queue.pending > 0 %}
+                <form method="post" action="/api/queue/control" onsubmit="return confirm('确定跳过所有待下载任务？')"><input type="hidden" name="action" value="clear_pending"><button><i class="fas fa-forward"></i> 跳过待下载</button></form>
+                {% endif %}
+                {% if queue.pending + queue.retrying + queue.downloading + queue.failed == 0 %}
+                <div class="queue-empty compact"><i class="fas fa-circle-check"></i><strong>没有需要处理的队列任务</strong></div>
+                {% endif %}
+            </section>
+
+            <section class="queue-grid">
+                {% for key,label,icon in [('pending','待下载','clock'),('downloading','下载中','spinner'),('done','已完成','check'),('failed','失败历史','xmark'),('retrying','重试中','rotate'),('skipped','已跳过','forward') ] %}
+                <div class="queue-card">
+                    <i class="fas fa-{{ icon }}"></i>
+                    <strong>{{ queue[key] }}</strong>
+                    <span>{{ label }}</span>
+                </div>
+                {% endfor %}
+            </section>
+
+            <section class="queue-list">
+                <h2>当前任务</h2>
+                {% if active_items %}
+                    {% for item in active_items %}
+                    <div class="queue-item">
+                        <div class="qi-main">
+                            <span class="source-pill source-{{ item.site }}">{{ item.site_label }}</span>
+                            <strong>{{ item.title }}</strong>
+                            <p>#{{ item.code }} · {{ item.status }} · retry {{ item.retry_count }}</p>
+                            {% if item.error_msg %}<em>{{ item.error_msg }}</em>{% endif %}
+                        </div>
+                    </div>
+                    {% endfor %}
+                {% else %}
+                    <div class="queue-empty"><i class="fas fa-circle-check"></i><strong>当前没有待处理任务</strong><span>pending / downloading / retrying 都是 0</span></div>
+                {% endif %}
+            </section>
+
+            {% if queue.failed > 0 %}
+            <section class="queue-list queue-history">
+                <details>
+                    <summary>失败历史 {{ queue.failed }} 个（默认折叠）</summary>
+                    {% if failed_items %}
+                        {% for item in failed_items %}
+                        <div class="queue-item failed-history">
+                            <div class="qi-main">
+                                <span class="source-pill source-{{ item.site }}">{{ item.site_label }}</span>
+                                <strong>{{ item.title }}</strong>
+                                <p>#{{ item.code }} · failed · retry {{ item.retry_count }}</p>
+                                {% if item.error_msg %}<em>{{ item.error_msg }}</em>{% endif %}
+                            </div>
+                        </div>
+                        {% endfor %}
+                    {% endif %}
+                </details>
+            </section>
+            {% endif %}
+        </main>
+        <nav class="bottom-nav">
+            <a href="/"><i class="fas fa-house"></i><span>首页</span></a>
+            <a href="/?view=discover"><i class="fas fa-compass"></i><span>发现</span></a>
+            <a href="/?view=latest"><i class="fas fa-clock"></i><span>最新</span></a>
+            <a class="active" href="/queue"><i class="fas fa-download"></i><span>队列</span></a>
+            <a href="/?view=91porny"><i class="fas fa-layer-group"></i><span>来源</span></a>
+        </nav>
+    </div>
+</body>
+</html>

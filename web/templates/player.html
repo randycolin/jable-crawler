@@ -1,0 +1,89 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+    <title>{{ video.title }} - 视频库</title>
+    <link rel="stylesheet" href="/static/css/style.css">
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+</head>
+<body class="watch-body">
+    <div class="watch-page">
+        <section class="watch-player">
+            <a class="watch-back" href="/"><i class="fas fa-chevron-left"></i></a>
+            <video id="mainVideo" controls autoplay playsinline preload="metadata">
+                <source src="{{ video.stream_path }}" type="video/mp4">
+                您的浏览器不支持视频播放
+            </video>
+        </section>
+
+        <section class="watch-info-card" id="current">
+            <div class="channel-avatar"><i class="fas fa-play"></i><span>当前视频</span></div>
+            <div class="watch-info-main">
+                <h1>{{ video.title }}</h1>
+                <div class="watch-meta">
+                    <span class="source-pill source-{{ video.site }}">{{ video.site_label }}</span>
+                    <span><i class="fas fa-hdd"></i> {{ video.size }}</span>
+                    <span><i class="far fa-clock"></i> {{ video.date }}</span>
+                    <span><i class="fas fa-folder"></i> {{ video.folder }}</span>
+                </div>
+                <div class="watch-actions">
+                    <a href="{{ video.stream_path }}" download="{{ video.name }}"><i class="fas fa-download"></i> 下载</a>
+                    <button type="button" onclick="copyUrl()"><i class="fas fa-link"></i> 复制</button>
+                </div>
+            </div>
+        </section>
+
+        <section class="recommend-list" id="recommend">
+            <h2 class="section-title">相关推荐</h2>
+            {% for rel in related %}
+            <article class="recommend-card">
+                <a class="recommend-thumb" href="/player/{{ rel.id }}">
+                    <img class="thumb-img" src="{{ rel.thumb_path }}" loading="lazy" alt="{{ rel.title }}">
+                    <div class="recommend-pattern"><i class="fas fa-play"></i></div>
+                    <span class="live-badge"><i class="fas fa-play"></i> 播放</span>
+                    <span class="duration-badge source-{{ rel.site }}">{{ rel.site_label }}</span>
+                </a>
+                <div class="recommend-content">
+                    <a class="recommend-title" href="/player/{{ rel.id }}">{{ rel.title }}</a>
+                    <div class="recommend-author">{{ rel.folder }}</div>
+                    <div class="recommend-stats"><i class="fas fa-play"></i> {{ rel.size }} · {{ rel.date }}</div>
+                </div>
+                <a class="watch-more" href="{{ rel.stream_path }}" download="{{ rel.name }}" title="下载"><i class="fas fa-download"></i></a>
+            </article>
+            {% else %}
+            <div class="queue-empty"><i class="fas fa-circle-check"></i><strong>没有相关推荐</strong></div>
+            {% endfor %}
+        </section>
+    </div>
+
+    <script>
+    function copyUrl() {
+        navigator.clipboard.writeText(window.location.href)
+            .then(() => alert('链接已复制'))
+            .catch(() => {
+                const input = document.createElement('input');
+                input.value = window.location.href;
+                document.body.appendChild(input);
+                input.select();
+                document.execCommand('copy');
+                document.body.removeChild(input);
+                alert('链接已复制');
+            });
+    }
+
+    const video = document.querySelector('#mainVideo');
+    const storageKey = `progress_${'{{ video.id }}'}`;
+    const savedTime = localStorage.getItem(storageKey);
+    if (savedTime) {
+        video.addEventListener('loadedmetadata', () => {
+            const t = parseFloat(savedTime);
+            if (!Number.isNaN(t) && t > 3 && t < video.duration - 3) video.currentTime = t;
+        });
+    }
+    video.addEventListener('timeupdate', () => {
+        localStorage.setItem(storageKey, video.currentTime);
+    });
+    </script>
+</body>
+</html>

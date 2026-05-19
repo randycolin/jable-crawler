@@ -1,0 +1,86 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+    <title>视频库</title>
+    <link rel="stylesheet" href="/static/css/style.css">
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+</head>
+<body>
+    <div class="app bili-app">
+        <main class="feed-main">
+            <header class="feed-topbar">
+                <a class="avatar" href="/?view=home"><i class="fas fa-play"></i></a>
+                <form class="feed-search" action="/" method="get">
+                    <input type="hidden" name="view" value="search">
+                    <i class="fas fa-search"></i>
+                    <input type="text" name="search" placeholder="搜索本地视频" value="{{ search }}">
+                </form>
+                <a class="msg-btn" href="/queue"><i class="fas fa-download"></i><span>{{ queue.pending + queue.downloading }}</span></a>
+            </header>
+
+            <nav class="feed-tabs">
+                <a class="tab {% if view == 'home' and not folder and not search %}active{% endif %}" href="/?view=home">全部</a>
+                <a class="tab {% if view == 'discover' %}active{% endif %}" href="/?view=discover">推荐</a>
+                <a class="tab {% if view == '91porny' %}active{% endif %}" href="/?view=91porny">91PORNY</a>
+                <a class="tab {% if view == 'jable' %}active{% endif %}" href="/?view=jable">Jable</a>
+                <a class="tab {% if view == 'latest' %}active{% endif %}" href="/?view=latest">最新</a>
+            </nav>
+
+            <section class="hero-banner">
+                <div class="hero-bg"></div>
+                <div class="hero-content">
+                    <div class="hero-kicker">JDL Player</div>
+                    <h1>{{ filtered_total }} / {{ total }} 个视频</h1>
+                    <p>{% if search %}搜索：{{ search }}{% elif view == '91porny' %}当前只加载 91PORNY 视频源{% elif view == 'jable' %}当前只加载 Jable 视频源{% elif view == 'discover' %}推荐/随机排序{% else %}全部来源 · 可切换 91PORNY / Jable{% endif %}</p>
+                </div>
+                <div class="hero-dots"><span></span><span></span><span class="active"></span></div>
+            </section>
+
+            <section class="feed-grid">
+                {% if videos %}
+                    {% for video in videos %}
+                    <article class="feed-card">
+                        <a href="/player/{{ video.id }}" class="thumb-link">
+                            <div class="feed-thumb">
+                                <img class="thumb-img" src="{{ video.thumb_path }}" loading="lazy" alt="{{ video.title }}">
+                                <div class="thumb-pattern"><i class="fas fa-play"></i></div>
+                                <div class="thumb-overlay">
+                                    <span><i class="fas fa-play"></i> {{ video.size }}</span>
+                                    <span><i class="far fa-comment-dots"></i> {{ video.code or video.ext }}</span>
+                                    <em class="source-badge source-{{ video.site }}">{{ video.site_label }}</em>
+                                </div>
+                            </div>
+                        </a>
+                        <div class="feed-info">
+                            <a href="/player/{{ video.id }}" class="feed-title">{{ video.title }}</a>
+                            <div class="up-row">
+                                <span class="up-badge source-{{ video.site }}">{{ video.site_label }}</span>
+                                <a class="up-name" href="/?view={{ video.site }}">{{ video.folder }}</a>
+                                <a class="more-btn" href="{{ video.stream_path }}" download="{{ video.name }}"><i class="fas fa-download"></i></a>
+                            </div>
+                        </div>
+                    </article>
+                    {% endfor %}
+                {% else %}
+                    <div class="empty-state">
+                        <i class="fas fa-film fa-3x"></i>
+                        <h3>没有找到视频</h3>
+                        <p>{% if search %}尝试其他搜索词{% else %}视频目录为空{% endif %}</p>
+                    </div>
+                {% endif %}
+            </section>
+        </main>
+
+        <nav class="bottom-nav">
+            <a class="{% if view in ['home','search'] %}active{% endif %}" href="/?view=home"><i class="fas fa-house"></i><span>首页</span></a>
+            <a class="{% if view == 'discover' %}active{% endif %}" href="/?view=discover"><i class="fas fa-compass"></i><span>发现</span></a>
+            <a class="{% if view == 'latest' %}active{% endif %}" href="/?view=latest"><i class="fas fa-clock"></i><span>最新</span></a>
+            <a href="/queue"><i class="fas fa-download"></i><span>队列</span></a>
+            <a class="{% if view in ['91porny','jable'] %}active{% endif %}" href="/?view=91porny"><i class="fas fa-layer-group"></i><span>来源</span></a>
+        </nav>
+    </div>
+    <script src="/static/js/main.js"></script>
+</body>
+</html>

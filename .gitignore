@@ -1,0 +1,53 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+*.egg
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# 虚拟环境
+venv/
+.venv/
+env/
+
+# 数据库 & 用户数据（绝对不能推送）
+*.db
+*.db-journal
+*.db-wal
+*.db-shm
+jable.db*
+
+# 下载的视频文件
+videos/
+downloads/
+
+# Web 用户生成的缩略图
+web/static/thumbs/*
+!web/static/thumbs/.gitkeep
+
+# 日志
+logs/
+*.log
+
+# 备份
+.backup_*/
+*.bak
+
+# 临时
+*.tmp
+*.swp
+.DS_Store
+Thumbs.db
+
+# IDE
+.idea/
+.vscode/
+*.sublime-*
+
+# 系统
+.env
+.env.local
